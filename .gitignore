@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+.ipynb_checkpoints/
+.DS_Store
+~$*.docx
+artifacts/*.joblib
+artifacts/*.json
+reports/figures/*.png
