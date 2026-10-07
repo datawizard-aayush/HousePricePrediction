@@ -38,17 +38,42 @@ def clean_region_values(df: pd.DataFrame) -> pd.DataFrame:
     return processed
 
 
+def clean_locality_values(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize locality names and pool localities with fewer than three listings."""
+    processed = df.copy()
+    processed["locality"] = (
+        processed["locality"]
+        .fillna("Unknown")
+        .astype(str)
+        .str.strip()
+        .str.replace(r"\s+", " ", regex=True)
+        .replace({"": "Unknown", "nan": "Unknown", "None": "Unknown"})
+    )
+    counts = processed["locality"].value_counts()
+    rare_localities = counts[counts < 3].index
+    processed["locality"] = processed["locality"].where(
+        ~processed["locality"].isin(rare_localities), "Other"
+    )
+    return processed
+
+
 def clean_and_prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """Apply the project-specific data cleaning rules for Mumbai property listings."""
     processed = normalize_price_unit(df)
     processed = clean_region_values(processed)
+    processed = clean_locality_values(processed)
 
     processed["bhk"] = pd.to_numeric(processed["bhk"], errors="coerce")
     processed["area"] = pd.to_numeric(processed["area"], errors="coerce")
-    processed["type"] = processed["type"].astype(str).str.strip()
-    processed["status"] = processed["status"].astype(str).str.strip()
-    processed["age"] = processed["age"].astype(str).str.strip()
-    processed["age"] = processed["age"].replace({"nan": "Unknown", "None": "Unknown", "": "Unknown"})
+    for column in ("type", "status", "age"):
+        processed[column] = (
+            processed[column]
+            .fillna("Unknown")
+            .astype(str)
+            .str.strip()
+            .str.replace(r"\s+", " ", regex=True)
+            .replace({"nan": "Unknown", "None": "Unknown", "": "Unknown"})
+        )
 
     processed = processed.dropna(subset=[TARGET_COLUMN]).copy()
     processed = processed[(processed["area"] >= 150) & (processed["area"] <= 8000)]
@@ -56,8 +81,9 @@ def clean_and_prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
     processed["price_per_sqft"] = (processed[TARGET_COLUMN] * 10000000.0) / processed["area"]
     processed = processed[(processed["price_per_sqft"] >= 2500) & (processed["price_per_sqft"] <= 120000)]
+    processed["area_per_bhk"] = processed["area"] / processed["bhk"]
 
-    processed = processed[FEATURE_COLUMNS + [TARGET_COLUMN]].copy()
+    processed = processed[FEATURE_COLUMNS + [TARGET_COLUMN, "price_per_sqft"]].copy()
     return processed.reset_index(drop=True)
 
 
@@ -79,11 +105,26 @@ def load_clean_data(path: str | Path = DATASET_PATH) -> pd.DataFrame:
     return cleaned
 
 
-def build_metadata(df: pd.DataFrame) -> dict:
+def build_metadata(
+    df: pd.DataFrame,
+    model_names: list[str] | None = None,
+    region_clusters: dict[str, str] | None = None,
+) -> dict:
+    """Build dashboard selectors and market summaries from cleaned listings."""
+    # Unit 4: market-level descriptive statistics support clustering and segmentation.
+    region_groups = df.groupby("region", observed=True)
     metadata = {
         "regions": sorted(df["region"].dropna().unique().tolist()),
+        "region_to_localities": {
+            region: sorted(group["locality"].dropna().unique().tolist())
+            for region, group in region_groups
+        },
+        "region_median_price_cr": region_groups[TARGET_COLUMN].median().to_dict(),
+        "region_median_price_per_sqft": region_groups["price_per_sqft"].median().to_dict(),
         "property_types": sorted(df["type"].dropna().unique().tolist()),
         "statuses": sorted(df["status"].dropna().unique().tolist()),
         "age_categories": sorted(df["age"].dropna().unique().tolist()),
+        "model_names": model_names or [],
+        "region_clusters": region_clusters or {},
     }
     return metadata

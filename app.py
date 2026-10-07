@@ -1,141 +1,375 @@
+"""Streamlit dashboard for model predictions and precomputed course diagnostics."""
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
+import matplotlib
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import streamlit as st
 
-from src.house_price_prediction.config import METADATA_PATH, MODEL_PATH
+from src.house_price_prediction.config import (
+    DIAGNOSTICS_PATH,
+    METADATA_PATH,
+    MODEL_PATH,
+    REPORTS_DIR,
+    TARGET_COLUMN,
+)
+from src.house_price_prediction.evaluation import predict_price_range
 from src.house_price_prediction.modeling import load_model_bundle
 
 
+st.set_page_config(page_title="Mumbai House Price Prediction", layout="wide")
+
+
 @st.cache_resource
-def load_project_assets():
-    if not MODEL_PATH.exists():
-        raise FileNotFoundError("The trained model is missing. Please run python train.py first.")
+def load_project_assets() -> tuple[dict, dict, dict]:
+    """Load trained assets only; fitting models always happens in train.py."""
+    required = (MODEL_PATH, METADATA_PATH, DIAGNOSTICS_PATH)
+    missing = [str(path) for path in required if not path.exists()]
+    if missing:
+        raise FileNotFoundError(
+            "Training artifacts are missing: "
+            + ", ".join(missing)
+            + ". Run `python train.py` from the project root, then reload this page."
+        )
+    with METADATA_PATH.open("r", encoding="utf-8") as source:
+        metadata = json.load(source)
+    with DIAGNOSTICS_PATH.open("r", encoding="utf-8") as source:
+        diagnostics = json.load(source)
+    return load_model_bundle(MODEL_PATH), metadata, diagnostics
 
-    if not METADATA_PATH.exists():
-        raise FileNotFoundError("The metadata file is missing. Please run python train.py first.")
 
-    with METADATA_PATH.open("r", encoding="utf-8") as fh:
-        metadata = json.load(fh)
+try:
+    bundle, metadata, diagnostics = load_project_assets()
+except (FileNotFoundError, OSError, ValueError) as error:
+    st.error(f"Dashboard assets could not be loaded. {error}")
+    st.stop()
 
-    bundle = load_model_bundle(MODEL_PATH)
-    return bundle, metadata
-
-
-bundle, metadata = load_project_assets()
-
-st.set_page_config(page_title="Mumbai House Price Predictor", layout="wide")
 st.title("Mumbai House Price Prediction Dashboard")
-st.caption("Predicting residential property prices across Mumbai using a cleaned, region-aware regression pipeline.")
+st.caption(
+    "Modeling asking prices in Crores. Cross-fitted target encoding preserves high-cardinality location signals."
+)
 
-region_options = metadata.get("regions", [])
-type_options = metadata.get("property_types", ["Apartment", "Studio Apartment", "Villa", "Independent House", "Penthouse"])
+
+def show_figure(name: str, caption: str | None = None) -> None:
+    path = REPORTS_DIR / name
+    if path.exists():
+        st.image(str(path), caption=caption, use_container_width=True)
+    else:
+        st.info(f"Figure {name} is not available. Run `python train.py` to regenerate artifacts.")
+
+
+def show_image_matrix(matrix: list[list[int]], labels: list[str], title: str) -> None:
+    fig, ax = plt.subplots(figsize=(6, 5))
+    image = ax.imshow(matrix, cmap="Blues")
+    fig.colorbar(image, ax=ax)
+    ax.set(
+        title=title,
+        xlabel="Predicted tier",
+        ylabel="Actual tier",
+        xticks=range(len(labels)),
+        yticks=range(len(labels)),
+        xticklabels=labels,
+        yticklabels=labels,
+    )
+    for row in range(len(labels)):
+        for column in range(len(labels)):
+            ax.text(column, row, str(matrix[row][column]), ha="center", va="center")
+    st.pyplot(fig)
+    plt.close(fig)
+
+
+def numeric_sensitivity(model, features: pd.DataFrame) -> pd.DataFrame:
+    """Show local numeric-feature changes around the current prediction (Unit 6 XAI)."""
+    result = []
+    point = float(np.exp(model.predict(features)[0]))
+    for feature in ("area", "bhk"):
+        changed = features.copy()
+        if feature == "area":
+            changed.loc[:, feature] = max(150, float(features.iloc[0][feature]) * 0.9)
+        else:
+            changed.loc[:, feature] = max(1, float(features.iloc[0][feature]) - 1)
+        changed.loc[:, "area_per_bhk"] = changed["area"] / changed["bhk"]
+        alternate = float(np.exp(model.predict(changed)[0]))
+        result.append(
+            {
+                "Changed input": feature,
+                "Comparison": "10% less area" if feature == "area" else "One fewer BHK",
+                "Estimate change (Cr)": alternate - point,
+            }
+        )
+    return pd.DataFrame(result)
+
+
 status_options = metadata.get("statuses", ["Ready to move", "Under Construction"])
+regions = metadata.get("regions", [])
+property_types = metadata.get("property_types", ["Apartment"])
 age_options = metadata.get("age_categories", ["New", "Resale", "Unknown"])
 
-status = st.selectbox("Construction Status", options=status_options)
+with st.sidebar:
+    st.header("Property details")
+    status = st.selectbox("Construction Status", status_options)
+    region = st.selectbox("Region", regions)
+
+locality_options = metadata.get("region_to_localities", {}).get(region, [])
+locality_options = sorted(set(locality_options + ["Other"]))
+if not locality_options:
+    locality_options = ["Other"]
 
 with st.form("prediction_form"):
-    col1, col2 = st.columns(2)
-
-    with col1:
-        region = st.selectbox("Region", options=region_options, index=0 if region_options else 0)
-        bhk = st.radio("BHK", options=list(range(1, 7)), horizontal=True, index=1)
-        area = st.number_input("Carpet Area (sq ft)", min_value=150, max_value=8000, value=850, step=10)
-        property_type = st.selectbox("Property Type", options=type_options)
-
-    with col2:
+    left, right = st.columns(2)
+    with left:
+        locality = st.selectbox("Locality", locality_options)
+        bhk = st.selectbox("BHK", range(1, 7), index=1)
+        area = st.number_input(
+            "Carpet Area (sq ft)", min_value=150, max_value=8000, value=850, step=10
+        )
+    with right:
+        property_type = st.selectbox("Property Type", property_types)
         if status == "Ready to move":
-            age_category = st.selectbox("Building Age Category", options=age_options)
+            age_category = st.selectbox("Building Age Category", age_options)
         else:
             age_category = "New"
             st.caption("Building age is set to New for under-construction properties.")
-
-    submitted = st.form_submit_button("Estimate Price")
+        include_asking_price = st.checkbox("Compare with an asking price")
+        asking_price = (
+            st.number_input("Asking price (Cr)", min_value=0.01, value=1.0, step=0.05)
+            if include_asking_price
+            else None
+        )
+    submitted = st.form_submit_button("Estimate Price", type="primary")
 
 if submitted:
-    input_df = pd.DataFrame([
-        {
-            "region": region,
-            "bhk": bhk,
-            "type": property_type,
-            "area": area,
-            "status": status,
-            "age": age_category,
-        }
-    ])
+    input_row = {
+        "region": region,
+        "locality": locality,
+        "bhk": int(bhk),
+        "type": property_type,
+        "area": float(area),
+        "area_per_bhk": float(area) / int(bhk),
+        "status": status,
+        "age": age_category,
+    }
+    input_frame = pd.DataFrame([input_row])
+    point = float(np.exp(bundle["best_pipeline"].predict(input_frame)[0]))
+    interval_low, interval_high = predict_price_range(
+        bundle["prediction_interval_models"], input_frame
+    )
+    st.session_state["last_prediction"] = {
+        "features": input_frame,
+        "point": point,
+        "low": min(point, interval_low, interval_high),
+        "high": max(point, interval_low, interval_high),
+        "asking_price": asking_price,
+    }
 
-    model = bundle["best_pipeline"]
-    pred_log = model.predict(input_df)[0]
-    predicted_crores = float(np.exp(pred_log))
-    rate_per_sqft = (predicted_crores * 10000000.0) / area
-    model_mae = bundle["metrics"][bundle["model_name"]]["MAE"]
+tabs = st.tabs(
+    [
+        "Prediction",
+        "Similar Listings",
+        "Model Comparison",
+        "Diagnostics",
+        "Explainability",
+        "Market Segments",
+        "Bias-Variance & Tuning",
+        "Ethics & Limitations",
+    ]
+)
 
-    st.success(f"Estimated Price: ₹{predicted_crores:,.2f} Cr")
-    st.write(f"Holdout MAE: ₹{model_mae:,.2f} Cr")
-    st.write(f"Approx. rate: ₹{rate_per_sqft:,.0f} per sq ft")
+with tabs[0]:
+    st.subheader("Prediction")
+    prediction_state = st.session_state.get("last_prediction")
+    if prediction_state is None:
+        st.info("Enter property details and submit the form to estimate a price.")
+    else:
+        point = prediction_state["point"]
+        low, high = prediction_state["low"], prediction_state["high"]
+        frame = prediction_state["features"]
+        rate_per_sqft = point * 10_000_000 / float(frame.iloc[0]["area"])
+        region_median_rate = metadata.get("region_median_price_per_sqft", {}).get(region)
+        a, b, c = st.columns(3)
+        a.metric("Estimated price", f"₹{point:,.2f} Cr")
+        b.metric("10th–90th percentile range", f"₹{low:,.2f}–{high:,.2f} Cr")
+        c.metric("Estimated rate", f"₹{rate_per_sqft:,.0f}/sq ft")
+        if region_median_rate:
+            st.write(
+                f"Region median: ₹{region_median_rate:,.0f}/sq ft "
+                f"({(rate_per_sqft / region_median_rate - 1) * 100:+.1f}% vs. median)."
+            )
+        classifier = bundle["best_classifier"]
+        class_index = int(classifier.predict(frame)[0])
+        probabilities = classifier.predict_proba(frame)[0]
+        tier_names = bundle["price_tier_names"]
+        st.write(
+            f"**Predicted price tier:** {tier_names[class_index]} "
+            f"({bundle['best_classifier_name']})"
+        )
+        st.dataframe(
+            pd.DataFrame(
+                {
+                    "Price tier": tier_names,
+                    "Probability": probabilities,
+                }
+            ).assign(Probability=lambda table: table["Probability"].map(lambda p: f"{p:.1%}")),
+            hide_index=True,
+            use_container_width=True,
+        )
+        market_name = metadata.get("region_clusters", {}).get(region, "Unmapped / outside training regions")
+        st.write(f"**Region market segment:** {market_name}")
+        asking = prediction_state["asking_price"]
+        if asking is not None:
+            difference = (asking / point - 1) * 100
+            verdict = "Overpriced" if difference > 10 else "Underpriced" if difference < -10 else "Fair deal"
+            st.info(f"**{verdict}** — asking price is {difference:+.1f}% vs. the estimate.")
+            st.caption("Verdicts use a ±10% comparison band; they are not financial advice.")
+        st.caption(
+            f"Best regression model: {bundle['best_model_name']} · "
+            f"holdout MAE: ₹{bundle['metrics'][bundle['best_model_name']]['MAE']:.2f} Cr."
+        )
 
-    with st.expander("Model details"):
-        st.write("Best model:", bundle["model_name"])
-        st.write("All prices are expressed in Crores.")
+with tabs[1]:
+    st.subheader("Similar Listings")
+    prediction_state = st.session_state.get("last_prediction")
+    listings = bundle.get("similar_listings")
+    if prediction_state is None:
+        st.info("Submit a prediction to find comparable real listings.")
+    elif listings is None or listings.empty:
+        st.warning("Similar-listing data was not saved. Retrain with the current train.py.")
+    else:
+        query = prediction_state["features"].iloc[0]
+        candidates = listings[listings["region"] == query["region"]].copy()
+        if candidates.empty:
+            candidates = listings.copy()
+        candidates["distance"] = (
+            np.abs(np.log(candidates["area"].clip(lower=1) / query["area"]))
+            + 0.7 * np.abs(candidates["bhk"] - query["bhk"])
+            + 0.6 * (candidates["type"] != query["type"]).astype(float)
+            + 0.4 * (candidates["locality"] != query["locality"]).astype(float)
+        )
+        shown = candidates.nsmallest(5, "distance")
+        columns = ["region", "locality", "bhk", "type", "area", "status", TARGET_COLUMN, "price_per_sqft"]
+        st.dataframe(shown[columns].rename(columns={TARGET_COLUMN: "price_cr"}), hide_index=True, use_container_width=True)
+        st.caption("Ranked within the selected region by area, BHK, property type, and locality.")
 
-    diagnostics = bundle["diagnostics"]
-    actual = np.array(diagnostics["actual_prices"])
-    predicted = np.array(diagnostics["predicted_prices"])
-    raw_target = np.array(diagnostics["target_values"])
-    log_target = np.array(diagnostics["target_log_values"])
+with tabs[2]:
+    st.subheader("Model Comparison")
+    regression_metrics = pd.DataFrame.from_dict(bundle["metrics"], orient="index").rename_axis("Model")
+    st.dataframe(regression_metrics.style.format(precision=3), use_container_width=True)
+    show_figure("regression_model_comparison.png", "5-fold CV MAE with standard deviation.")
+    classifier_metrics = pd.DataFrame.from_dict(
+        diagnostics["classification_metrics"], orient="index"
+    ).drop(columns=["Confusion_Matrix"])
+    st.markdown("#### Price-tier classification")
+    st.dataframe(classifier_metrics.style.format(precision=3), use_container_width=True)
+    class_names = diagnostics["price_tier_names"]
+    best_classification = bundle["classification_metrics"][bundle["best_classifier_name"]]
+    show_image_matrix(
+        best_classification["Confusion_Matrix"],
+        class_names,
+        f"{bundle['best_classifier_name']}: Confusion Matrix",
+    )
+    roc_data = diagnostics["classification_curves"][bundle["best_classifier_name"]]
+    fig, ax = plt.subplots(figsize=(7, 5))
+    for tier, curve in roc_data.items():
+        ax.plot(curve["fpr"], curve["tpr"], label=tier)
+    ax.plot([0, 1], [0, 1], linestyle="--", color="grey")
+    ax.set(xlabel="False Positive Rate", ylabel="True Positive Rate", title="One-vs-Rest ROC Curves")
+    ax.legend()
+    st.pyplot(fig)
+    plt.close(fig)
 
-    tab1, tab2, tab3 = st.tabs(["Diagnostics", "Price Distribution", "Feature Importance"])
+with tabs[3]:
+    st.subheader("Diagnostics")
+    regression = diagnostics["regression"]
+    actual = np.asarray(regression["actual_prices"])
+    predicted = np.asarray(regression["predicted_prices"])
+    residuals = np.asarray(regression["residuals"])
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+    axes[0].scatter(actual, predicted, alpha=0.45, s=12)
+    axes[0].plot([actual.min(), actual.max()], [actual.min(), actual.max()], "r--")
+    axes[0].set(title="Actual vs Predicted", xlabel="Actual (Cr)", ylabel="Predicted (Cr)")
+    axes[1].scatter(predicted, residuals, alpha=0.45, s=12)
+    axes[1].axhline(0, color="red", linestyle="--")
+    axes[1].set(title="Residual Plot", xlabel="Predicted (Cr)", ylabel="Residual (Cr)")
+    st.pyplot(fig)
+    plt.close(fig)
 
-    with tab1:
-        fig1, ax1 = plt.subplots(figsize=(6, 6))
-        ax1.scatter(actual, predicted, alpha=0.5, s=20)
-        ax1.plot([actual.min(), actual.max()], [actual.min(), actual.max()], color="red", linestyle="--")
-        ax1.set_xlabel("Actual Price (Crores)")
-        ax1.set_ylabel("Predicted Price (Crores)")
-        ax1.set_title("Actual vs Predicted Prices")
-        st.pyplot(fig1)
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4.5))
+    axes[0].hist(residuals, bins=45, color="slateblue", alpha=0.8)
+    axes[0].set(title="Residual Histogram", xlabel="Error (Cr)", ylabel="Frequency")
+    axes[1].hist(diagnostics["price_distribution"]["raw"], bins=45, color="steelblue", alpha=0.75)
+    axes[1].set(title="Raw Price Distribution", xlabel="Price (Cr)", ylabel="Listings")
+    axes[2].hist(diagnostics["price_distribution"]["log"], bins=45, color="darkorange", alpha=0.75)
+    axes[2].set(title="Log Price Distribution", xlabel="Log(Price in Cr)", ylabel="Listings")
+    st.pyplot(fig)
+    plt.close(fig)
 
-    with tab2:
-        fig2, (ax2_1, ax2_2) = plt.subplots(1, 2, figsize=(12, 4.5))
+with tabs[4]:
+    st.subheader("Explainability — Unit 6")
+    importance = pd.DataFrame(bundle["explainability"]["permutation_importance"])
+    st.dataframe(importance.style.format(precision=4), hide_index=True, use_container_width=True)
+    show_figure("permutation_importance.png", "Holdout permutation importance for the CV-selected best model.")
+    show_figure("partial_dependence.png", "Partial dependence for carpet area and BHK.")
+    prediction_state = st.session_state.get("last_prediction")
+    if prediction_state is not None:
+        st.markdown("#### Optional local explanation")
+        st.caption("One-feature-at-a-time sensitivity around this estimate; changes are not causal effects.")
+        st.dataframe(
+            numeric_sensitivity(bundle["best_pipeline"], prediction_state["features"]),
+            hide_index=True,
+            use_container_width=True,
+        )
 
-        ax2_1.hist(raw_target, bins=40, color="steelblue", edgecolor="black", alpha=0.7)
-        ax2_1.set_title("Raw Price Distribution")
-        ax2_1.set_xlabel("Price (₹ Crores)")
-        ax2_1.set_ylabel("Frequency")
-        ax2_1.grid(True, linestyle="--", alpha=0.5)
+with tabs[5]:
+    st.subheader("Market Segments — Unit 4")
+    cluster = diagnostics["cluster_diagnostics"]
+    st.write(f"Selected k: **{cluster['selected_k']}** · PCA explained variance: {sum(cluster['pca_explained_variance']):.1%}")
+    show_figure("market_elbow_silhouette.png", "K-Means elbow and silhouette diagnostics.")
+    show_figure("market_gmm_comparison.png", "Gaussian Mixture AIC/BIC model comparison.")
+    show_figure("market_pca_clusters.png", "PCA projection of region market clusters.")
+    show_figure("market_dendrogram.png", "Ward hierarchical clustering dendrogram.")
+    region_summary = pd.DataFrame(diagnostics["region_summary"])
+    st.dataframe(
+        region_summary[["region", "cluster", "median_price_per_sqft", "median_price_cr", "listing_count", "median_area"]]
+        .sort_values(["cluster", "median_price_per_sqft"]),
+        hide_index=True,
+        use_container_width=True,
+    )
+    st.caption("Clusters are descriptive, fitted from the training partition, and are not prediction features.")
 
-        ax2_2.hist(log_target, bins=40, color="darkorange", edgecolor="black", alpha=0.7)
-        ax2_2.set_title("Log-Transformed Price Distribution")
-        ax2_2.set_xlabel("Log(1 + Price in Cr)")
-        ax2_2.set_ylabel("Frequency")
-        ax2_2.grid(True, linestyle="--", alpha=0.5)
+with tabs[6]:
+    st.subheader("Bias-Variance & Tuning — Unit 5")
+    show_figure("learning_curves.png", "Training and validation learning curves.")
+    show_figure("decision_tree_validation_curve.png", "Decision Tree max_depth validation curve.")
+    st.markdown("#### Best regression hyperparameters")
+    st.json(bundle["best_params"])
+    st.caption(
+        "The validation curves illustrate underfitting at low complexity and overfitting at high complexity. "
+        "Randomized searches use 3-fold CV; Ridge and Lasso alpha use grid search."
+    )
 
-        plt.tight_layout()
-        st.pyplot(fig2)
-
-
-    with tab3:
-        rf_pipeline = bundle.get("random_forest_pipeline")
-        if rf_pipeline is not None:
-            preprocessor = rf_pipeline.named_steps["preprocessor"]
-            feature_names = preprocessor.get_feature_names_out()
-            importances = rf_pipeline.named_steps["model"].feature_importances_
-            importance_df = pd.DataFrame({"feature": feature_names, "importance": importances})
-            importance_df = importance_df.sort_values("importance", ascending=False).head(10)
-
-            fig3, ax3 = plt.subplots(figsize=(8, 5))
-            ax3.barh(importance_df["feature"][::-1], importance_df["importance"][::-1])
-            ax3.set_title("Top Random Forest Feature Importance")
-            ax3.set_xlabel("Importance")
-            st.pyplot(fig3)
-        else:
-            st.info("Random Forest model is not available for feature importance plotting.")
-
-else:
-    st.info("Fill in the property details and click Estimate Price to generate the prediction.")
+with tabs[7]:
+    st.subheader("Ethics & Limitations — Unit 6")
+    st.warning(
+        "The dataset contains advertised asking prices, not verified completed sale prices. "
+        "It may overrepresent properties that are listed or actively marketed."
+    )
+    st.write(
+        "- Rare localities are grouped or have less reliable estimates.\n"
+        "- Coverage and asking-price practices can vary by region and property type.\n"
+        "- Error breakdowns are descriptive fairness checks, not proof of fairness or absence of bias.\n"
+        "- Do not use this model as the sole basis for a purchase, sale, loan, or other financial decision."
+    )
+    fairness = diagnostics["group_errors"]
+    st.markdown("#### Error by region market segment")
+    segment_errors = pd.DataFrame(fairness["by_region_cluster"])
+    st.dataframe(segment_errors.style.format({"MAE_Cr": "{:.3f}", "MAPE_pct": "{:.1f}%"}), hide_index=True)
+    st.bar_chart(segment_errors.set_index("Group")["MAE_Cr"])
+    st.markdown("#### Error by property type")
+    type_errors = pd.DataFrame(fairness["by_property_type"])
+    st.dataframe(type_errors.style.format({"MAE_Cr": "{:.3f}", "MAPE_pct": "{:.1f}%"}), hide_index=True)
+    st.bar_chart(type_errors.set_index("Group")["MAE_Cr"])

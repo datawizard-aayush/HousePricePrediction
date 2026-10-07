@@ -10,7 +10,17 @@ MODEL_PATH = ROOT_DIR / "model_pipeline.joblib"
 METADATA_PATH = ROOT_DIR / "metadata.json"
 DIAGNOSTICS_PATH = ROOT_DIR / "diagnostics.json"
 
-TARGET_COLUMN = "price_in_crores"
-FEATURE_COLUMNS = ["region", "bhk", "type", "area", "status", "age"]
-NUMERIC_FEATURES = ["bhk", "area"]
-CATEGORICAL_FEATURES = ["region", "type", "status", "age"]
+TARGET_COLUMN = "price_cr"
+FEATURE_COLUMNS = [
+    "region",
+    "locality",
+    "bhk",
+    "type",
+    "area",
+    "area_per_bhk",
+    "status",
+    "age",
+]
+NUMERIC_FEATURES = ["bhk", "area", "area_per_bhk"]
+HIGH_CARDINALITY_FEATURES = ["region", "locality"]
+CATEGORICAL_FEATURES = ["type", "status", "age"]
