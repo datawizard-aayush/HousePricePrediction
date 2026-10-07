@@ -102,14 +102,23 @@ if submitted:
         st.pyplot(fig1)
 
     with tab2:
-        fig2, ax2 = plt.subplots(figsize=(8, 4))
-        ax2.hist(raw_target, bins=40, alpha=0.7, label="Price", color="steelblue")
-        ax2.hist(np.exp(log_target), bins=40, alpha=0.5, label="Log-Transformed Base", color="orange")
-        ax2.set_title("Target Distribution (Raw and Log-Transformed)")
-        ax2.set_xlabel("Price (Crores)")
-        ax2.set_ylabel("Frequency")
-        ax2.legend()
+        fig2, (ax2_1, ax2_2) = plt.subplots(1, 2, figsize=(12, 4.5))
+
+        ax2_1.hist(raw_target, bins=40, color="steelblue", edgecolor="black", alpha=0.7)
+        ax2_1.set_title("Raw Price Distribution")
+        ax2_1.set_xlabel("Price (₹ Crores)")
+        ax2_1.set_ylabel("Frequency")
+        ax2_1.grid(True, linestyle="--", alpha=0.5)
+
+        ax2_2.hist(log_target, bins=40, color="darkorange", edgecolor="black", alpha=0.7)
+        ax2_2.set_title("Log-Transformed Price Distribution")
+        ax2_2.set_xlabel("Log(1 + Price in Cr)")
+        ax2_2.set_ylabel("Frequency")
+        ax2_2.grid(True, linestyle="--", alpha=0.5)
+
+        plt.tight_layout()
         st.pyplot(fig2)
+
 
     with tab3:
         rf_pipeline = bundle.get("random_forest_pipeline")
