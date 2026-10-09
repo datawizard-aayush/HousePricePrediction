@@ -173,10 +173,6 @@ tabs = st.tabs(
         "Similar Listings",
         "Model Comparison",
         "Diagnostics",
-        "Explainability",
-        "Market Segments",
-        "Bias-Variance & Tuning",
-        "Ethics & Limitations",
     ]
 )
 
@@ -218,8 +214,6 @@ with tabs[0]:
             hide_index=True,
             use_container_width=True,
         )
-        market_name = metadata.get("region_clusters", {}).get(region, "Unmapped / outside training regions")
-        st.write(f"**Region market segment:** {market_name}")
         asking = prediction_state["asking_price"]
         if asking is not None:
             difference = (asking / point - 1) * 100
@@ -308,68 +302,3 @@ with tabs[3]:
     st.pyplot(fig)
     plt.close(fig)
 
-with tabs[4]:
-    st.subheader("Explainability — Unit 6")
-    importance = pd.DataFrame(bundle["explainability"]["permutation_importance"])
-    st.dataframe(importance.style.format(precision=4), hide_index=True, use_container_width=True)
-    show_figure("permutation_importance.png", "Holdout permutation importance for the CV-selected best model.")
-    show_figure("partial_dependence.png", "Partial dependence for carpet area and BHK.")
-    prediction_state = st.session_state.get("last_prediction")
-    if prediction_state is not None:
-        st.markdown("#### Optional local explanation")
-        st.caption("One-feature-at-a-time sensitivity around this estimate; changes are not causal effects.")
-        st.dataframe(
-            numeric_sensitivity(bundle["best_pipeline"], prediction_state["features"]),
-            hide_index=True,
-            use_container_width=True,
-        )
-
-with tabs[5]:
-    st.subheader("Market Segments — Unit 4")
-    cluster = diagnostics["cluster_diagnostics"]
-    st.write(f"Selected k: **{cluster['selected_k']}** · PCA explained variance: {sum(cluster['pca_explained_variance']):.1%}")
-    show_figure("market_elbow_silhouette.png", "K-Means elbow and silhouette diagnostics.")
-    show_figure("market_gmm_comparison.png", "Gaussian Mixture AIC/BIC model comparison.")
-    show_figure("market_pca_clusters.png", "PCA projection of region market clusters.")
-    show_figure("market_dendrogram.png", "Ward hierarchical clustering dendrogram.")
-    region_summary = pd.DataFrame(diagnostics["region_summary"])
-    st.dataframe(
-        region_summary[["region", "cluster", "median_price_per_sqft", "median_price_cr", "listing_count", "median_area"]]
-        .sort_values(["cluster", "median_price_per_sqft"]),
-        hide_index=True,
-        use_container_width=True,
-    )
-    st.caption("Clusters are descriptive, fitted from the training partition, and are not prediction features.")
-
-with tabs[6]:
-    st.subheader("Bias-Variance & Tuning — Unit 5")
-    show_figure("learning_curves.png", "Training and validation learning curves.")
-    show_figure("decision_tree_validation_curve.png", "Decision Tree max_depth validation curve.")
-    st.markdown("#### Best regression hyperparameters")
-    st.json(bundle["best_params"])
-    st.caption(
-        "The validation curves illustrate underfitting at low complexity and overfitting at high complexity. "
-        "Randomized searches use 3-fold CV; Ridge and Lasso alpha use grid search."
-    )
-
-with tabs[7]:
-    st.subheader("Ethics & Limitations — Unit 6")
-    st.warning(
-        "The dataset contains advertised asking prices, not verified completed sale prices. "
-        "It may overrepresent properties that are listed or actively marketed."
-    )
-    st.write(
-        "- Rare localities are grouped or have less reliable estimates.\n"
-        "- Coverage and asking-price practices can vary by region and property type.\n"
-        "- Error breakdowns are descriptive fairness checks, not proof of fairness or absence of bias.\n"
-        "- Do not use this model as the sole basis for a purchase, sale, loan, or other financial decision."
-    )
-    fairness = diagnostics["group_errors"]
-    st.markdown("#### Error by region market segment")
-    segment_errors = pd.DataFrame(fairness["by_region_cluster"])
-    st.dataframe(segment_errors.style.format({"MAE_Cr": "{:.3f}", "MAPE_pct": "{:.1f}%"}), hide_index=True)
-    st.bar_chart(segment_errors.set_index("Group")["MAE_Cr"])
-    st.markdown("#### Error by property type")
-    type_errors = pd.DataFrame(fairness["by_property_type"])
-    st.dataframe(type_errors.style.format({"MAE_Cr": "{:.3f}", "MAPE_pct": "{:.1f}%"}), hide_index=True)
-    st.bar_chart(type_errors.set_index("Group")["MAE_Cr"])
