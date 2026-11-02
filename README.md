@@ -25,15 +25,25 @@ streamlit run app.py
 
 On Windows, double-click `start.bat` to launch the dashboard. It runs `train.py` first if any required model artifacts are missing, then starts Streamlit.
 
-Training performs a fixed 80/20 holdout, training-partition-only hyperparameter searches, 5-fold cross-validation, and writes the dashboard bundle (`model_pipeline.joblib`), selector/market metadata (`metadata.json`), precomputed diagnostics (`diagnostics.json`), benchmark CSVs under `reports/`, and figures under `reports/figures/`. The Streamlit app only loads saved artifacts; it never trains models.
+Training uses one Random Forest regressor for price prediction and one Random Forest classifier for price tiers. It performs a fixed 80/20 holdout, tunes the regressor on the training partition, evaluates it with 5-fold cross-validation, and writes the dashboard bundle (`model_pipeline.joblib`), selector/market metadata (`metadata.json`), precomputed diagnostics (`diagnostics.json`), and figures under `reports/figures/`. The Streamlit app only loads saved artifacts; it never trains models.
 
 After pulling code changes, run `python train.py` to regenerate compatible artifacts before launching the app. The regenerated model bundle is larger than GitHub's 100 MB per-file limit and is not included in the repository update.
 
-The regression benchmark includes nine algorithms. SVR (RBF) uses a deterministic 10,000-row sample in each training fold and final fit to limit runtime; validation and holdout predictions still cover their complete partitions.
+## Dashboard graphs
+
+The Evaluation tab shows a one-vs-rest confusion matrix for a selected price tier, with TN, FP, FN, and TP labeled, and the classifier's one-vs-rest ROC curves. The Diagnostics tab shows:
+
+- Actual vs. predicted prices
+- Residuals vs. predicted prices
+- Holdout residual distribution
+- Raw price distribution
+- Log-price distribution
+
+Training also writes model explanation and market-segmentation figures under `reports/figures/`, including permutation importance, partial dependence, the selected model's learning curve, K-Means elbow/silhouette scores, Gaussian Mixture AIC/BIC, PCA clusters, and a Ward dendrogram. Model-algorithm comparison tables and the regression comparison chart are no longer produced.
 
 ## Project structure
 
-- `train.py`: training orchestration, benchmarks, persisted artifacts, and figures.
+- `train.py`: training orchestration for the selected models, persisted artifacts, and figures.
 - `app.py`: prediction dashboard and precomputed analysis tabs.
 - `src/house_price_prediction/config.py`: feature and artifact paths.
 - `src/house_price_prediction/data_processing.py`: data cleaning and listing metadata.
@@ -49,20 +59,16 @@ Course Outcome labels below are concise project alignments; use the institution'
 
 | Project feature / syllabus concept | Unit | Course Outcome |
 |---|---:|---|
-| Simple and Multiple Linear Regression | 1 | CO1 — Select and implement supervised learning algorithms |
-| Ridge and Lasso regularization | 2, 5 | CO1, CO2 — Apply regularization and evaluate model generalization |
-| Decision Tree and Random Forest Regression | 2 | CO1, CO2 — Compare tree-based models and control complexity |
-| KNN Regressor and KNN Classifier | 3, 5 | CO1, CO2 — Apply distance-based learning and tune it |
-| Logistic Regression for price tiers | 3 | CO1 — Apply classification methods |
+| Random Forest regression | 2 | CO1 — Select and implement a supervised learning algorithm |
+| Price-tier classification with Random Forest | 3 | CO1 — Apply classification methods |
 | Confusion Matrix, Accuracy, Precision, Recall, F1, ROC-AUC | 3, 5 | CO4 — Evaluate classification outcomes with suitable metrics |
-| SVR (RBF) | 2 | CO1, CO2 — Apply margin-based regression and compare models |
-| HistGradientBoosting and 10th/90th percentile intervals | 5 | CO2, CO4 — Tune estimators and communicate prediction uncertainty |
-| 5-fold cross-validation, holdout testing, Randomized/Grid Search | 5 | CO2 — Validate models and select hyperparameters |
-| Learning and validation curves; bias-variance and over/underfitting | 5 | CO2 — Diagnose generalization and model complexity |
+| 10th/90th percentile prediction intervals | 5 | CO2, CO4 — Communicate prediction uncertainty |
+| 5-fold cross-validation, holdout testing, Randomized Search | 5 | CO2 — Validate model generalization and tune hyperparameters |
+| Learning curves; bias-variance and over/underfitting | 5 | CO2 — Diagnose generalization and model complexity |
 | K-Means with elbow and silhouette selection | 4 | CO3 — Discover market segments without labels |
-| Ward hierarchical clustering and dendrogram | 4 | CO3 — Compare hierarchical grouping structure |
+| Ward hierarchical clustering and dendrogram | 4 | CO3 — Examine hierarchical grouping structure |
 | PCA visualization and explained variance | 4 | CO3 — Reduce dimensions and interpret cluster structure |
-| Gaussian Mixture Model (AIC/BIC comparison) | 4 | CO3 — Compare probabilistic clustering |
+| Gaussian Mixture Model (AIC/BIC) | 4 | CO3 — Examine probabilistic clusters |
 | Permutation importance, partial dependence, local sensitivity | 6 | CO5 — Explain model behavior |
 | Region/type error checks and limitations discussion | 6 | CO5 — Assess fairness risks and responsible use |
 

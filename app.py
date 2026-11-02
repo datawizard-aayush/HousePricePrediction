@@ -15,9 +15,9 @@ from src.house_price_prediction.config import (
     DIAGNOSTICS_PATH,
     METADATA_PATH,
     MODEL_PATH,
-    REPORTS_DIR,
     TARGET_COLUMN,
 )
+from src.house_price_prediction.classification import one_vs_rest_confusion_matrix
 from src.house_price_prediction.evaluation import predict_price_range
 from src.house_price_prediction.modeling import load_model_bundle
 
@@ -55,22 +55,19 @@ st.caption(
 )
 
 
-def show_figure(name: str, caption: str | None = None) -> None:
-    path = REPORTS_DIR / name
-    if path.exists():
-        st.image(str(path), caption=caption, use_container_width=True)
-    else:
-        st.info(f"Figure {name} is not available. Run `python train.py` to regenerate artifacts.")
-
-
-def show_image_matrix(matrix: list[list[int]], labels: list[str], title: str) -> None:
+def show_image_matrix(
+    matrix: list[list[int]],
+    labels: list[str],
+    title: str,
+    cell_names: list[list[str]] | None = None,
+) -> None:
     fig, ax = plt.subplots(figsize=(6, 5))
     image = ax.imshow(matrix, cmap="Blues")
     fig.colorbar(image, ax=ax)
     ax.set(
         title=title,
-        xlabel="Predicted tier",
-        ylabel="Actual tier",
+        xlabel="Predicted",
+        ylabel="Actual",
         xticks=range(len(labels)),
         yticks=range(len(labels)),
         xticklabels=labels,
@@ -78,7 +75,10 @@ def show_image_matrix(matrix: list[list[int]], labels: list[str], title: str) ->
     )
     for row in range(len(labels)):
         for column in range(len(labels)):
-            ax.text(column, row, str(matrix[row][column]), ha="center", va="center")
+            cell_text = str(matrix[row][column])
+            if cell_names:
+                cell_text = f"{cell_names[row][column]}: {cell_text}"
+            ax.text(column, row, cell_text, ha="center", va="center")
     st.pyplot(fig)
     plt.close(fig)
 
@@ -171,7 +171,7 @@ tabs = st.tabs(
     [
         "Prediction",
         "Similar Listings",
-        "Model Comparison",
+        "Evaluation",
         "Diagnostics",
     ]
 )
@@ -250,21 +250,47 @@ with tabs[1]:
         st.caption("Ranked within the selected region by area, BHK, property type, and locality.")
 
 with tabs[2]:
-    st.subheader("Model Comparison")
-    regression_metrics = pd.DataFrame.from_dict(bundle["metrics"], orient="index").rename_axis("Model")
-    st.dataframe(regression_metrics.style.format(precision=3), use_container_width=True)
-    show_figure("regression_model_comparison.png", "5-fold CV MAE with standard deviation.")
-    classifier_metrics = pd.DataFrame.from_dict(
-        diagnostics["classification_metrics"], orient="index"
-    ).drop(columns=["Confusion_Matrix"])
-    st.markdown("#### Price-tier classification")
-    st.dataframe(classifier_metrics.style.format(precision=3), use_container_width=True)
-    class_names = diagnostics["price_tier_names"]
+    st.subheader("Model Evaluation")
+    st.markdown(f"#### Price prediction: {bundle['best_model_name']}")
+    regression_metrics = bundle["metrics"][bundle["best_model_name"]]
+    metric_columns = st.columns(3)
+    metric_columns[0].metric("Holdout MAE", f"₹{regression_metrics['MAE']:.3f} Cr")
+    metric_columns[1].metric("Holdout RMSE", f"₹{regression_metrics['RMSE']:.3f} Cr")
+    metric_columns[2].metric("Holdout R²", f"{regression_metrics['R2']:.3f}")
+    st.caption(
+        f"5-fold cross-validation MAE: ₹{regression_metrics['CV_MAE_Mean']:.3f} Cr "
+        f"(±{regression_metrics['CV_MAE_Std']:.3f})."
+    )
+
+    st.markdown(f"#### Price-tier classification: {bundle['best_classifier_name']}")
     best_classification = bundle["classification_metrics"][bundle["best_classifier_name"]]
+    classifier_columns = st.columns(4)
+    classifier_metric_labels = {
+        "Accuracy": "Accuracy",
+        "Precision_macro": "Precision (macro)",
+        "Recall_macro": "Recall (macro)",
+        "F1_macro": "F1 (macro)",
+    }
+    for column, (metric_name, label) in zip(
+        classifier_columns, classifier_metric_labels.items()
+    ):
+        column.metric(label, f"{best_classification[metric_name]:.3f}")
+
+    class_names = bundle["price_tier_names"]
+    selected_tier = st.selectbox("Positive class for confusion matrix", class_names)
+    positive_index = class_names.index(selected_tier)
+    binary_matrix = one_vs_rest_confusion_matrix(
+        best_classification["Confusion_Matrix"], positive_index
+    )
     show_image_matrix(
-        best_classification["Confusion_Matrix"],
-        class_names,
-        f"{bundle['best_classifier_name']}: Confusion Matrix",
+        binary_matrix,
+        ["Negative", "Positive"],
+        f"One-vs-rest confusion matrix: {selected_tier}",
+        [["TN", "FP"], ["FN", "TP"]],
+    )
+    st.caption(
+        "Positive = the selected price tier; Negative = all other tiers. "
+        "The four cells are TN (top-left), FP (top-right), FN (bottom-left), and TP (bottom-right)."
     )
     roc_data = diagnostics["classification_curves"][bundle["best_classifier_name"]]
     fig, ax = plt.subplots(figsize=(7, 5))
@@ -301,4 +327,3 @@ with tabs[3]:
     axes[2].set(title="Log Price Distribution", xlabel="Log(Price in Cr)", ylabel="Listings")
     st.pyplot(fig)
     plt.close(fig)
-

@@ -46,7 +46,7 @@ def _json_default(value):
     raise TypeError(f"Cannot serialize value of type {type(value).__name__}")
 
 
-def _save_regression_figures(bundle: dict, results_df: pd.DataFrame, df: pd.DataFrame) -> None:
+def _save_regression_figures(bundle: dict, df: pd.DataFrame) -> None:
     diagnostics = bundle["diagnostics"]
     actual = np.asarray(diagnostics["actual_prices"])
     predicted = np.asarray(diagnostics["predicted_prices"])
@@ -73,15 +73,6 @@ def _save_regression_figures(bundle: dict, results_df: pd.DataFrame, df: pd.Data
     fig.savefig(FIGURES_DIR / "price_and_residual_distributions.png", dpi=150)
     plt.close(fig)
 
-    fig, ax = plt.subplots(figsize=(10, 5))
-    ordered = results_df.sort_values("CV_MAE_Mean")
-    ax.barh(ordered["Model"], ordered["CV_MAE_Mean"], xerr=ordered["CV_MAE_Std"])
-    ax.set(title="Regression Model Comparison (5-fold CV)", xlabel="Mean MAE (Cr)")
-    fig.tight_layout()
-    fig.savefig(FIGURES_DIR / "regression_model_comparison.png", dpi=150)
-    plt.close(fig)
-
-
 def main() -> None:
     """Train the models and write the model bundle, metadata, metrics, and figures."""
     FIGURES_DIR.mkdir(parents=True, exist_ok=True)
@@ -94,7 +85,7 @@ def main() -> None:
     df = load_clean_data(DATASET_PATH)
     print(f"  {len(df):,} rows remain after filters.", flush=True)
 
-    print("Training and comparing regression models...", flush=True)
+    print("Training the selected Random Forest regression model...", flush=True)
     bundle, regression_results, X_train, X_test, y_train_log = train_regression(df)
     y_test_cr = df.loc[X_test.index, TARGET_COLUMN]
     y_train_cr = df.loc[X_train.index, TARGET_COLUMN]
@@ -155,20 +146,16 @@ def main() -> None:
     bundle.pop("test_features", None)
     bundle.pop("test_target_log", None)
 
-    model_names = regression_results["Model"].tolist() + list(
-        classification["classification_metrics"].keys()
-    )
+    model_names = regression_results["Model"].tolist() + list(classification["classification_metrics"])
     metadata = build_metadata(df, model_names=model_names, region_clusters=region_clusters)
     with METADATA_PATH.open("w", encoding="utf-8") as output:
         json.dump(metadata, output, indent=2, default=_json_default)
     save_model_bundle(bundle, MODEL_PATH)
 
-    _save_regression_figures(bundle, regression_results, df)
-    regression_results.to_csv(Path("reports") / "regression_benchmarks.csv", index=False)
-    classification_results = pd.DataFrame.from_dict(
-        classification["classification_metrics"], orient="index"
-    ).drop(columns=["Confusion_Matrix"])
-    classification_results.to_csv(Path("reports") / "classification_benchmarks.csv")
+    _save_regression_figures(bundle, df)
+    classifier_metrics = classification["classification_metrics"][
+        classification["best_classifier_name"]
+    ]
 
     diagnostic_payload = {
         "regression": bundle["diagnostics"],
@@ -191,7 +178,7 @@ def main() -> None:
     with DIAGNOSTICS_PATH.open("w", encoding="utf-8") as output:
         json.dump(diagnostic_payload, output, indent=2, default=_json_default)
 
-    print("\n=== Regression benchmark (Crores) ===")
+    print("\n=== Selected regression model (Crores) ===")
     print(
         regression_results.to_string(
             index=False,
@@ -206,10 +193,10 @@ def main() -> None:
             },
         )
     )
-    print("\n=== Classification benchmark ===")
-    print(classification_results.to_string())
-    print(f"\nBest regression model by CV MAE: {bundle['best_model_name']}")
-    print(f"Best price-tier classifier: {bundle['best_classifier_name']}")
+    print("\n=== Selected price-tier classifier ===")
+    print(pd.Series(classifier_metrics).drop(labels="Confusion_Matrix").to_string())
+    print(f"\nRegression model: {bundle['best_model_name']}")
+    print(f"Price-tier classifier: {bundle['best_classifier_name']}")
     print(f"Saved model bundle: {MODEL_PATH}")
     print(f"Saved metadata: {METADATA_PATH}")
     print(f"Saved diagnostics: {DIAGNOSTICS_PATH}")

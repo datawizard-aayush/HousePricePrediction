@@ -1,4 +1,4 @@
-"""Regression pipelines and leakage-safe benchmark/tuning routines."""
+"""Selected regression pipeline and leakage-safe tuning routines."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -7,21 +7,16 @@ import joblib
 import numpy as np
 import pandas as pd
 from sklearn.compose import ColumnTransformer
-from sklearn.ensemble import HistGradientBoostingRegressor, RandomForestRegressor
-from sklearn.linear_model import Lasso, LinearRegression, Ridge
+from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import (
-    GridSearchCV,
     KFold,
     RandomizedSearchCV,
     StratifiedKFold,
     train_test_split,
 )
-from sklearn.neighbors import KNeighborsRegressor
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler, TargetEncoder
-from sklearn.svm import SVR
-from sklearn.tree import DecisionTreeRegressor
 from sklearn.base import clone
 
 from .config import (
@@ -80,20 +75,10 @@ def _pipeline(
 
 
 def build_model_registry() -> dict[str, Pipeline]:
-    """Unit 1/2/5: linear models, regularization, neighbors, trees, ensembles, and SVR."""
+    """Build the selected Random Forest price-regression pipeline."""
     return {
-        "Simple Linear Regression": _pipeline(LinearRegression(), ["area"]),
-        "Multiple Linear Regression": _pipeline(LinearRegression()),
-        "Ridge Regression": _pipeline(Ridge()),
-        "Lasso Regression": _pipeline(Lasso(max_iter=10000, random_state=RANDOM_STATE)),
-        "KNN Regressor": _pipeline(KNeighborsRegressor(n_jobs=-1)),
-        "Decision Tree Regressor": _pipeline(DecisionTreeRegressor(random_state=RANDOM_STATE)),
         "Random Forest Regressor": _pipeline(
             RandomForestRegressor(random_state=RANDOM_STATE, n_jobs=-1)
-        ),
-        "SVR (RBF)": _pipeline(SVR(kernel="rbf")),
-        "HistGradientBoostingRegressor": _pipeline(
-            HistGradientBoostingRegressor(random_state=RANDOM_STATE)
         ),
     }
 
@@ -115,70 +100,33 @@ def _negative_crore_mae(estimator, features, target_log) -> float:
     return -mean_absolute_error(np.exp(target_log), np.exp(estimator.predict(features)))
 
 
-def _fit_subset(pipeline, X: pd.DataFrame, y: pd.Series, limit: int = 10000) -> None:
-    """Fit SVR on a reproducible 10k-row sample; other models use all training rows."""
-    if len(X) > limit:
-        sample = X.sample(n=limit, random_state=RANDOM_STATE).index
-        pipeline.fit(X.loc[sample], y.loc[sample])
-    else:
-        pipeline.fit(X, y)
-
-
 def _tune_estimators(
     models: dict[str, Pipeline], X_train: pd.DataFrame, y_train: pd.Series
 ) -> dict[str, dict]:
-    """Tune selected estimators using only the training partition."""
+    """Tune the selected Random Forest using only the training partition."""
     tuning_specs = {
-        "Random Forest Regressor": (
-            {
-                "model__n_estimators": [100, 150, 200],
-                "model__max_depth": [None, 18, 28],
-                "model__min_samples_leaf": [1, 2, 4],
-                "model__max_features": [0.7, 1.0],
-            },
-            "randomized",
-        ),
-        "KNN Regressor": (
-            {
-                "model__n_neighbors": [5, 9, 15, 25],
-                "model__weights": ["uniform", "distance"],
-                "model__p": [1, 2],
-            },
-            "randomized",
-        ),
-        "HistGradientBoostingRegressor": (
-            {
-                "model__max_iter": [100, 160, 220],
-                "model__max_leaf_nodes": [15, 31, 63],
-                "model__learning_rate": [0.05, 0.08, 0.1],
-                "model__l2_regularization": [0.0, 0.1, 1.0],
-            },
-            "randomized",
-        ),
-        "Ridge Regression": ({"model__alpha": [0.01, 0.1, 1.0, 10.0, 100.0]}, "grid"),
-        "Lasso Regression": ({"model__alpha": [0.0001, 0.001, 0.01, 0.1, 1.0]}, "grid"),
+        "Random Forest Regressor": {
+            "model__n_estimators": [100, 150, 200],
+            "model__max_depth": [None, 18, 28],
+            "model__min_samples_leaf": [1, 2, 4],
+            "model__max_features": [0.7, 1.0],
+        }
     }
     best_params = {}
     inner_cv = KFold(n_splits=3, shuffle=True, random_state=RANDOM_STATE)
-    for name, (parameters, search_type) in tuning_specs.items():
-        print(f"  Tuning {name} ({search_type}, CV=3)...", flush=True)
-        shared = {
-            "estimator": models[name],
-            "scoring": _negative_crore_mae,
-            "cv": inner_cv,
-            "n_jobs": 1,
-            "refit": True,
-            "verbose": 1,
-        }
-        if search_type == "randomized":
-            search = RandomizedSearchCV(
-                param_distributions=parameters,
-                n_iter=15,
-                random_state=RANDOM_STATE,
-                **shared,
-            )
-        else:
-            search = GridSearchCV(param_grid=parameters, **shared)
+    for name, parameters in tuning_specs.items():
+        print(f"  Tuning {name} (randomized search, CV=3)...", flush=True)
+        search = RandomizedSearchCV(
+            estimator=models[name],
+            param_distributions=parameters,
+            scoring=_negative_crore_mae,
+            cv=inner_cv,
+            n_iter=15,
+            random_state=RANDOM_STATE,
+            n_jobs=1,
+            refit=True,
+            verbose=1,
+        )
         search.fit(X_train, y_train)
         models[name] = search.best_estimator_
         best_params[name] = search.best_params_
@@ -186,58 +134,51 @@ def _tune_estimators(
 
 
 def train_regression(df: pd.DataFrame) -> tuple[dict, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.Series]:
-    """Train, tune, cross-validate, and hold out all regression candidates."""
+    """Tune and evaluate the selected Random Forest regressor."""
     features = df[FEATURE_COLUMNS]
     target_log = np.log(df[TARGET_COLUMN].astype(float))
     X_train, X_test, y_train, y_test = train_test_split(
         features, target_log, test_size=0.2, random_state=RANDOM_STATE
     )
     models = build_model_registry()
-    print("Regression tuning on the 80% training partition...", flush=True)
+    print("Tuning the Random Forest regressor on the 80% training partition...", flush=True)
     best_params = _tune_estimators(models, X_train, y_train)
 
     cv = KFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE)
     results: list[dict] = []
     fitted_models: dict[str, Pipeline] = {}
-    for name, candidate in models.items():
-        print(f"  5-fold CV: {name}...", flush=True)
-        mae_scores, r2_scores = [], []
-        for train_indices, validation_indices in cv.split(X_train):
-            fold_model = clone(candidate)
-            fold_X = X_train.iloc[train_indices]
-            fold_y = y_train.iloc[train_indices]
-            if name == "SVR (RBF)":
-                _fit_subset(fold_model, fold_X, fold_y)
-            else:
-                fold_model.fit(fold_X, fold_y)
-            validation_X = X_train.iloc[validation_indices]
-            validation_actual = np.exp(y_train.iloc[validation_indices])
-            validation_predicted = np.exp(fold_model.predict(validation_X))
-            mae_scores.append(mean_absolute_error(validation_actual, validation_predicted))
-            r2_scores.append(r2_score(validation_actual, validation_predicted))
+    name, candidate = next(iter(models.items()))
+    print(f"  5-fold CV: {name}...", flush=True)
+    mae_scores, r2_scores = [], []
+    for train_indices, validation_indices in cv.split(X_train):
+        fold_model = clone(candidate)
+        fold_X = X_train.iloc[train_indices]
+        fold_y = y_train.iloc[train_indices]
+        fold_model.fit(fold_X, fold_y)
+        validation_X = X_train.iloc[validation_indices]
+        validation_actual = np.exp(y_train.iloc[validation_indices])
+        validation_predicted = np.exp(fold_model.predict(validation_X))
+        mae_scores.append(mean_absolute_error(validation_actual, validation_predicted))
+        r2_scores.append(r2_score(validation_actual, validation_predicted))
 
-        final_model = clone(candidate)
-        if name == "SVR (RBF)":
-            _fit_subset(final_model, X_train, y_train)
-        else:
-            final_model.fit(X_train, y_train)
-        fitted_models[name] = final_model
-        holdout = evaluate_pipeline(final_model, X_test, y_test)
-        results.append(
-            {
-                "Model": name,
-                "CV_MAE_Mean": float(np.mean(mae_scores)),
-                "CV_MAE_Std": float(np.std(mae_scores)),
-                "CV_R2_Mean": float(np.mean(r2_scores)),
-                "CV_R2_Std": float(np.std(r2_scores)),
-                "Test_MAE": holdout["MAE"],
-                "Test_RMSE": holdout["RMSE"],
-                "Test_R2": holdout["R2"],
-            }
-        )
-    results_df = pd.DataFrame(results).sort_values("CV_MAE_Mean").reset_index(drop=True)
-    best_name = str(results_df.iloc[0]["Model"])
-    best_pipeline = fitted_models[best_name]
+    best_pipeline = clone(candidate)
+    best_pipeline.fit(X_train, y_train)
+    fitted_models = {name: best_pipeline}
+    holdout = evaluate_pipeline(best_pipeline, X_test, y_test)
+    results.append(
+        {
+            "Model": name,
+            "CV_MAE_Mean": float(np.mean(mae_scores)),
+            "CV_MAE_Std": float(np.std(mae_scores)),
+            "CV_R2_Mean": float(np.mean(r2_scores)),
+            "CV_R2_Std": float(np.std(r2_scores)),
+            "Test_MAE": holdout["MAE"],
+            "Test_RMSE": holdout["RMSE"],
+            "Test_R2": holdout["R2"],
+        }
+    )
+    results_df = pd.DataFrame(results)
+    best_name = name
     predicted_test = np.exp(best_pipeline.predict(X_test))
     actual_test = np.exp(y_test)
     diagnostics = {

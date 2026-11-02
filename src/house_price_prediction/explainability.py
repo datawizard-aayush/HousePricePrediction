@@ -11,11 +11,10 @@ import numpy as np
 import pandas as pd
 from sklearn.base import clone
 from sklearn.inspection import PartialDependenceDisplay, permutation_importance
-from sklearn.model_selection import learning_curve, validation_curve
-from sklearn.tree import DecisionTreeRegressor
+from sklearn.model_selection import learning_curve
 
 from .config import REPORTS_DIR
-from .modeling import RANDOM_STATE, _negative_crore_mae, _pipeline
+from .modeling import RANDOM_STATE, _negative_crore_mae
 
 
 def build_explainability(
@@ -85,81 +84,44 @@ def build_learning_diagnostics(
     y_train_log: pd.Series,
     figures_dir: Path = REPORTS_DIR,
 ) -> dict:
-    """Compare shallow/deep decision trees with the CV-best model."""
+    """Plot the selected model's training and validation learning curves."""
     figures_dir.mkdir(parents=True, exist_ok=True)
     n = min(len(X_train), 12000)
     selected = X_train.sample(n=n, random_state=RANDOM_STATE).index
     X = X_train.loc[selected]
     y = y_train_log.loc[selected]
     curves = {}
-    candidates = {
-        "Decision Tree (low depth)": _pipeline(
-            DecisionTreeRegressor(max_depth=3, random_state=RANDOM_STATE)
-        ),
-        "Decision Tree (high depth)": _pipeline(
-            DecisionTreeRegressor(max_depth=24, random_state=RANDOM_STATE)
-        ),
-        "Best model": clone(best_model),
-    }
     fig, ax = plt.subplots(figsize=(9, 5))
-    for name, estimator in candidates.items():
-        sizes, train_scores, validation_scores = learning_curve(
-            estimator,
-            X,
-            y,
-            train_sizes=[0.2, 0.5, 1.0],
-            cv=3,
-            scoring=_negative_crore_mae,
-            shuffle=True,
-            random_state=RANDOM_STATE,
-            n_jobs=1,
-        )
-        train_mae = -train_scores.mean(axis=1)
-        validation_mae = -validation_scores.mean(axis=1)
-        curves[name] = {
-            "training_sizes": sizes.tolist(),
-            "train_mae": train_mae.tolist(),
-            "validation_mae": validation_mae.tolist(),
-        }
-        ax.plot(sizes, validation_mae, marker="o", label=f"{name} (validation)")
-        ax.plot(sizes, train_mae, linestyle="--", alpha=0.65, label=f"{name} (training)")
-    ax.set(title="Learning Curves: Overfitting, Underfitting & Bias-Variance", xlabel="Training rows", ylabel="MAE (Cr)")
-    ax.legend(fontsize=7)
+    sizes, train_scores, validation_scores = learning_curve(
+        clone(best_model),
+        X,
+        y,
+        train_sizes=[0.2, 0.5, 1.0],
+        cv=3,
+        scoring=_negative_crore_mae,
+        shuffle=True,
+        random_state=RANDOM_STATE,
+        n_jobs=1,
+    )
+    train_mae = -train_scores.mean(axis=1)
+    validation_mae = -validation_scores.mean(axis=1)
+    curves["Selected model"] = {
+        "training_sizes": sizes.tolist(),
+        "train_mae": train_mae.tolist(),
+        "validation_mae": validation_mae.tolist(),
+    }
+    ax.plot(sizes, validation_mae, marker="o", label="Validation")
+    ax.plot(sizes, train_mae, linestyle="--", alpha=0.65, label="Training")
+    ax.set(title="Selected Model Learning Curve", xlabel="Training rows", ylabel="MAE (Cr)")
+    ax.legend()
     fig.tight_layout()
     fig.savefig(figures_dir / "learning_curves.png", dpi=150)
     plt.close(fig)
 
-    tree = _pipeline(DecisionTreeRegressor(random_state=RANDOM_STATE))
-    depths = [2, 3, 5, 8, 12, 18, 24, 32]
-    train_scores, validation_scores = validation_curve(
-        tree,
-        X,
-        y,
-        param_name="model__max_depth",
-        param_range=depths,
-        cv=3,
-        scoring=_negative_crore_mae,
-        n_jobs=1,
-    )
-    validation_data = {
-        "max_depth": depths,
-        "train_mae": (-train_scores.mean(axis=1)).tolist(),
-        "validation_mae": (-validation_scores.mean(axis=1)).tolist(),
-    }
-    fig, ax = plt.subplots(figsize=(8, 4))
-    ax.plot(depths, validation_data["train_mae"], marker="o", label="Training")
-    ax.plot(depths, validation_data["validation_mae"], marker="o", label="Validation")
-    ax.set(title="Decision Tree Validation Curve", xlabel="max_depth", ylabel="MAE (Cr)")
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(figures_dir / "decision_tree_validation_curve.png", dpi=150)
-    plt.close(fig)
     return {
         "learning_curves": curves,
-        "validation_curve": validation_data,
         "figures": {
             "learning_curves": "learning_curves.png",
-            "validation_curve": "decision_tree_validation_curve.png",
         },
     }
 
